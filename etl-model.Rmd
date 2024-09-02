@@ -1,0 +1,273 @@
+---
+title: "ETL"
+author: "Antonio Huerta Montellano"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# Configuración global de opciones
+knitr::opts_chunk$set(
+  echo = TRUE,            # Muestra el código en el documento (TRUE) o lo oculta (FALSE)
+  warning = FALSE,        # Desactiva la impresión de warnings
+  message = FALSE         # Desactiva la impresión de mensajes adicionales
+)
+# Cargar las librerías
+library(janitor)            # Limpieza de datos y nombres de columnas
+library(readxl)             # Lectura de archivos Excel
+library(readr)              # Lectura de archivos de texto y CSV
+library(tidyverse)          # Conjunto de paquetes para ciencia de datos, incluye ggplot2, dplyr, tidyr, etc.
+library(ggplot2)            # Creación de gráficos
+library(ggrepel)            # Mejoras en las etiquetas de ggplot2
+library(purrr)              # Programación funcional
+library(dplyr)              # Manipulación de datos
+library(tidyr)              # Transformación y limpieza de datos
+library(stringi)            # Manipulación de cadenas de texto
+library(sp)                 # Manejo de datos espaciales
+library(geosphere)          # Cálculos geoespaciales
+library(sf)                 # Manejo de datos espaciales con Simple Features
+library(leaflet)            # Creación de mapas interactivos
+library(writexl)            # Escritura de archivos Excel
+library(data.table)         # Manipulación eficiente de datos
+library(stringr)            # Manipulación de cadenas de texto (parte del tidyverse)
+library(rnaturalearth)      # Datos geoespaciales naturales
+library(rnaturalearthdata)  # Datos geoespaciales naturales
+library(viridis)            # Usar escala de colores
+library(fastDummies)        # Dummificar columnas
+library(plm)                # Estimar modelos panel
+library(sandwich)           # Para la función vcovHC
+library(lmtest)             # Para la función coeftest
+library(haven)              # Exportar a formato stata
+library(foreign)            # Exportar en distintos formatos
+library(stargazer)          # Dar formato a resultados
+```
+
+
+En esta sección se describe el procesamiento de datos llevado a cabo para generar la base de datos empleadas para el cálculo de las participaciones de mercado para las ciudades de Nuevo León, Ciudad de México y Jalisco por tamaño de aforo, respectivamente.En la primera sección se detalla la versión del lenguaje de programación “R” usada, así como las librerías empleadas para la ejecuación de todo el código presentado. Por otro lado, la segunda sección muestra las funciones empleadas para realizar ciertas operaciones como el cálculo del índice de Herfindahl-Hirschmann por mercado tamaño de aforo para cada los estados de la república anteriormente señalada. Por último, en la tercera sección se describe el tratamiento de datos de las fuentes de datos empleadas para construir la base de participaciones por aforo de cada estado, las cuales tienen por nombre **panel_long_modelo**, además de mostrar el código para el cálculo de estas
+
+# Software
+Los cálculos que se explican en esta sección fueron realizados con el programa informático R version 4.4.1 (2024-06-14) en un equipo con sistema operativo Windows. La versión de “R” utilizada para la ejecución de los comandos que se señalan en esta sección tenía cargados los paquetes: `dplyr`, `tidyr`, `readr`, `readxl`, `lubridate`, `plm`, `sandwich`, `lmtest`, `stringr`, `purrr`, y `tibble`.
+
+# Funciones
+## Tipo de columna
+```{r funcion-tipo-columna}
+funcion_obtener_tipos <- function(df) {
+  # Crear un dataframe con los nombres de columnas y sus tipos
+  resultado <- data.frame(
+    columna = names(df),
+    tipo = sapply(df, class),
+    stringsAsFactors = FALSE
+  )
+  rownames(resultado) <- 1:nrow(resultado)
+  
+  return(resultado)
+}
+```
+
+## NA por columna
+```{r funcion-contar, echo=FALSE}
+# Generar dataframe con el conteo de NA por columna
+funcion_contar_na_por_columna <- function(df) {
+  na_count <- sapply(df, function(col) sum(is.na(col)))
+  
+  na_count_df <- data.frame(
+    Columna = names(na_count),
+    Cantidad_NA = na_count
+  )
+  rownames(na_count_df) <- 1:nrow(na_count_df)
+  
+  return(na_count_df)
+}
+```
+
+## Directorio de trabajo
+```{r funcion-mostrar-wd-actual}
+funcion_obtener_wd <- function() {
+  # Obtener el directorio actual de trabajo
+  current_directory <- getwd()
+  cat("El directorio actual de trabajo es:", current_directory, "\n")
+  return(current_directory)
+}
+
+# Ejemplo de uso
+funcion_obtener_wd()
+```
+
+## Detectar codificación
+```{r funcion-detectar-encoding}
+funcion_detectar_codificacion <- function(file_path) {
+  encodings <- guess_encoding(file_path, n_max = 1000)
+  print(encodings)
+  
+  mas_probable <- encodings$encoding[1]
+  cat("La codificación más probable del archivo", file_path, "es:", mas_probable, "\n")
+  return(mas_probable)
+}
+```
+
+
+# Importación de datos
+## Índice nacional de precios al consumidor
+Mediante el siguiente código, se importó el archivo electrónico denominado **ca55_2018.xlsx** que contiene el índice nacional de precios al consumidor a nivel mensual. El producto final del procesamiento es una estructura de datos llamada **inpc_data**.
+```{r data-free-agents}
+# Iterar a través de los años desde 2011 hasta 2023
+for (year in 2011:2023) {
+  # Crear la ruta del archivo para cada año
+  file_path <- paste0("Raw-Data/Free_Agents/free_agents_", year, ".csv")
+  
+  # Llamar a la función para detectar la codificación
+  funcion_detectar_codificacion(file_path)
+}
+```
+```{r etl-free-agents-panel}
+# Crear una lista para almacenar los dataframes
+free_agent_list <- list()
+
+# Iterar a través de los años desde 2011 hasta 2023
+for (year in 2011:2023) {
+  free_agent_path <- paste0("Raw-Data/Free_Agents/free_agents_", year, ".csv")
+  df <- read_csv(
+    free_agent_path,
+    locale = locale(encoding = "UTF-8"),
+    col_types = cols(.default = "c"), 
+    show_col_types = FALSE
+  ) %>%
+  rename_with(~gsub("PLAYER \\(.*\\)", "PLAYER", .), starts_with("PLAYER")) %>% # Renombrar columna de jugadores
+  select(-WAR,-RANK,-POS) %>%
+  filter(!is.na(PLAYER)) %>%
+  rename(
+    player = PLAYER,
+    age = AGE,
+    years_experience = YOE,
+    bats_throws = `B/T`,
+    team_from = `TEAM FROM`,
+    team_to = `TEAM TO`,
+    years_contract = YRS,
+    contract_value = VALUE,
+    average_anual_contract_value = AAV
+  ) %>%
+  mutate(
+    initial_year = as.numeric(year),
+    player = gsub(" ", "_",tolower(stri_trans_general(player, "Latin-ASCII"))),
+    player = gsub("[^a-zA-Z0-9_]", "", player),
+    team_from = gsub(" ", "_",tolower(stri_trans_general(team_from, "Latin-ASCII"))),
+    team_from = replace_na(team_from,"no"),
+    team_to = gsub(" ", "_",tolower(stri_trans_general(team_to, "Latin-ASCII"))),
+    dummy_team_change = ifelse((team_from != team_to) & (team_from != "no"),1,0),
+    bats_throws = tolower(bats_throws),
+    contract_value = as.numeric(gsub("[^a-zA-Z0-9_]", "", contract_value)),
+    average_anual_contract_value = as.numeric(gsub("[^a-zA-Z0-9_]", "", average_anual_contract_value)),
+    year = as.numeric(year),
+    years_experience = as.numeric(years_experience),
+    years_contract = as.numeric(years_contract),
+    end_contract_year = initial_year + years_contract
+  ) %>%
+  filter(!is.na(average_anual_contract_value)) %>%
+  filter(contract_value != 0) %>%
+  distinct()
+  cat("Archivo leído correctamente:", year, "\n")
+  free_agent_list[[as.character(year)]] <- df
+}
+rm(list = c("df","free_agent_path"))
+# Unir base de datos
+free_agent_panel <- bind_rows(free_agent_list)
+free_agent_panel <- free_agent_panel %>%
+  group_by(player,team_to) %>%
+  mutate(contract_id = row_number()) %>%
+  ungroup()
+head(free_agent_panel)
+```
+
+```{r}
+funcion_contar_na_por_columna(free_agent_panel)
+```
+```{r}
+# Crear un identificador de contrato único en la tabla de agentes libres
+free_agents_df_sup <- free_agent_panel %>%
+  group_by(player) %>%
+  mutate(n() > 1, .groups = "drop")
+```
+
+
+## Hitters panel
+```{r etl-hitting}
+# Crear una lista para almacenar los dataframes
+hitting_list <- list()
+# Iterar a través de los años desde 2011 hasta 2023
+for (year in 2011:2023) {
+  hitting_path <- paste0("Raw-Data/Hitting/hitting_", year, ".csv")
+  df <- read_csv(
+    hitting_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+  rename_with(~tolower(.)) %>%
+  rename(position = pos) %>%
+  select(where(~!all(is.na(.)))) %>%
+  select(-cash2023) %>%
+  filter(!is.na(player)) %>%
+  mutate(
+    year = as.character(year),
+    player = gsub(" ", "_",tolower(stri_trans_general(player, "Latin-ASCII"))),
+    player = gsub("[^a-zA-Z0-9_]", "", player),
+    position = gsub(" ", "_",tolower(position)),
+    team = gsub(" ", "_",tolower(stri_trans_general(team, "Latin-ASCII")))
+  )
+  cat("Archivo leído correctamente:", year, "\n")
+  hitting_list[[as.character(year)]] <- df
+}
+rm(list = c("df","hitting_path"))
+# Unir base de datos
+hitting_panel <- bind_rows(hitting_list)
+head(hitting_panel)
+funcion_contar_na_por_columna(hitting_panel)
+```
+
+Merge this panel to the free agent's panel
+```{r batter-fa-merge}
+hitting_panel_merge <- hitting_panel %>%
+  left_join(free_agent_panel, by = c("player","team"="team_to")) %>%
+  filter(!is.na(contract_value))
+```
+
+
+## Fielders panel
+```{r etl-pitching}
+# Crear una lista para almacenar los dataframes
+pitching_list <- list()
+# Iterar a través de los años desde 2011 hasta 2023
+for (year in 2011:2023) {
+  pitching_path <- paste0("Raw-Data/Hitting/hitting_", year, ".csv")
+  df <- read_csv(
+    pitching_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+  rename_with(~tolower(.)) %>%
+  rename(position = pos) %>%
+  select(where(~!all(is.na(.)))) %>%
+  select(-cash2023) %>%
+  filter(!is.na(player)) %>%
+  mutate(
+    year = as.character(year),
+    player = gsub(" ", "_",tolower(stri_trans_general(player, "Latin-ASCII"))),
+    player = gsub("[^a-zA-Z0-9_]", "", player),
+    position = gsub(" ", "_",tolower(position)),
+    team = gsub(" ", "_",tolower(stri_trans_general(team, "Latin-ASCII")))
+  )
+  cat("Archivo leído correctamente:", year, "\n")
+  pitching_list[[as.character(year)]] <- df
+}
+rm(list = c("df","hitting_path"))
+# Unir base de datos
+pitching_panel <- bind_rows(pitching_list)
+head(pitching_panel)
+```
+
+
+
+
+
+
