@@ -139,8 +139,8 @@ for (year in 2011:2023) {
   filter(!is.na(PLAYER)) %>%
   rename(
     player = PLAYER,
-    age = AGE,
-    years_experience = YOE,
+    initial_age = AGE,
+    initial_experience = YOE,
     bats_throws = `B/T`,
     team_from = `TEAM FROM`,
     team_to = `TEAM TO`,
@@ -149,7 +149,7 @@ for (year in 2011:2023) {
     average_anual_contract_value = AAV
   ) %>%
   mutate(
-    initial_year = as.numeric(year),
+    initial_contract_year = as.numeric(year),
     player = gsub(" ", "_",tolower(stri_trans_general(player, "Latin-ASCII"))),
     player = gsub("[^a-zA-Z0-9_]", "", player),
     team_from = gsub(" ", "_",tolower(stri_trans_general(team_from, "Latin-ASCII"))),
@@ -159,14 +159,20 @@ for (year in 2011:2023) {
     bats_throws = tolower(bats_throws),
     contract_value = as.numeric(gsub("[^a-zA-Z0-9_]", "", contract_value)),
     average_anual_contract_value = as.numeric(gsub("[^a-zA-Z0-9_]", "", average_anual_contract_value)),
-    year = as.numeric(year),
-    years_experience = as.numeric(years_experience),
     years_contract = as.numeric(years_contract),
-    end_contract_year = initial_year + years_contract
+    end_contract_year = initial_contract_year + years_contract
   ) %>%
   filter(!is.na(average_anual_contract_value)) %>%
   filter(contract_value != 0) %>%
-  distinct()
+  distinct() %>%
+  rowwise() %>%
+  mutate(year = list(initial_contract_year:end_contract_year)) %>%
+  unnest(year) %>%
+  mutate(
+    year = as.character(year),
+    age = as.numeric(initial_age) + (as.numeric(year) - initial_contract_year),
+    years_experience = as.numeric(initial_experience) + (as.numeric(year) - initial_contract_year)
+  )
   cat("Archivo leído correctamente:", year, "\n")
   free_agent_list[[as.character(year)]] <- df
 }
@@ -176,7 +182,14 @@ free_agent_panel <- bind_rows(free_agent_list)
 free_agent_panel <- free_agent_panel %>%
   group_by(player,team_to) %>%
   mutate(contract_id = row_number()) %>%
-  ungroup()
+  ungroup() %>%
+  select(
+    contract_id,player,age,
+    year,initial_contract_year,end_contract_year,
+    dummy_team_change,average_anual_contract_value,
+    everything()
+  ) %>%
+select(-initial_age,-initial_experience)
 head(free_agent_panel)
 ```
 
@@ -221,15 +234,31 @@ for (year in 2011:2023) {
 rm(list = c("df","hitting_path"))
 # Unir base de datos
 hitting_panel <- bind_rows(hitting_list)
+# Obtener los nombres de columnas numéricas
+batter_numeric_columns <- names(hitting_panel)[sapply(hitting_panel, is.numeric)]
 head(hitting_panel)
 funcion_contar_na_por_columna(hitting_panel)
 ```
 
+
 Merge this panel to the free agent's panel
 ```{r batter-fa-merge}
 hitting_panel_merge <- hitting_panel %>%
-  left_join(free_agent_panel, by = c("player","team"="team_to")) %>%
-  filter(!is.na(contract_value))
+  left_join(free_agent_panel, by = c("player","team"="team_to","year")) %>%
+  filter(!is.na(contract_value)) %>%
+  filter(year >= initial_contract_year & year <= end_contract_year) %>%  
+  group_by(player, initial_contract_year, end_contract_year) %>%
+  summarise(
+    across(all_of(batter_numeric_columns), 
+           mean, 
+           na.rm = TRUE, 
+           .names = "mean_{.col}"),
+    across(all_of(batter_numeric_columns), 
+           last, 
+           .names = "{.col}_t1"),
+    
+    .groups = 'drop'
+  )
 ```
 
 
@@ -266,7 +295,11 @@ pitching_panel <- bind_rows(pitching_list)
 head(pitching_panel)
 ```
 
-
+```{r fielder-fa-merge}
+fielding_panel_merge <- pitching_panel %>%
+  left_join(free_agent_panel, by = c("player","team"="team_to","year")) %>%
+  filter(!is.na(contract_value))
+```
 
 
 
