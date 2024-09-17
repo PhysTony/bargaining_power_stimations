@@ -98,7 +98,7 @@ funcion_obtener_wd()
 ## Detectar codificación
 ```{r funcion-detectar-encoding}
 funcion_detectar_codificacion <- function(file_path) {
-  encodings <- guess_encoding(file_path, n_max = 1000)
+  encodings <- guess_encoding(file_path)
   print(encodings)
   
   mas_probable <- encodings$encoding[1]
@@ -193,14 +193,45 @@ select(-initial_age,-initial_experience)
 head(free_agent_panel)
 ```
 
-```{r}
-funcion_contar_na_por_columna(free_agent_panel)
-```
-```{r}
-# Crear un identificador de contrato único en la tabla de agentes libres
-free_agents_df_sup <- free_agent_panel %>%
-  group_by(player) %>%
-  mutate(n() > 1, .groups = "drop")
+## Team panel
+```{r etl-team}
+# Crear una lista para almacenar los dataframes
+team_list <- list()
+# Iterar a través de los años desde 2011 hasta 2023
+for (year in 2011:2023) {
+  hitting_path <- paste0("Raw-Data/Teams/team_revenues.xlsx")
+  df <- read_excel(
+    hitting_path,
+    sheet = as.character(year)
+  ) %>%
+  select(team = Team, revenue = `Revenue ($mil)`) %>%
+  mutate(
+    year = as.character(year),
+    team = gsub(" ", "_",tolower(stri_trans_general(team, "Latin-ASCII"))),
+    team = gsub("[^a-zA-Z0-9_]", "", team),
+    revenue = as.numeric(revenue)
+  )
+  team_list[[as.character(year)]] <- df
+}
+team_panel <- bind_rows(team_list)
+# Acronym data
+acronym_path <- paste0("Raw-Data/Teams/team_acronym.csv")
+  team_acronyms <- read_csv(
+    acronym_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+  select(team = Equipo, acronym = Acronimo) %>%
+  mutate(
+    acronym = gsub(" ", "_",tolower(stri_trans_general(acronym, "Latin-ASCII"))),
+    team = gsub(" ", "_",tolower(stri_trans_general(team, "Latin-ASCII"))),
+    team = gsub("[^a-zA-Z0-9_]", "", team)
+  )
+team_panel <- team_panel %>%
+  left_join(team_acronyms, by = "team")
+free_agent_panel <- free_agent_panel %>%
+  left_join(team_panel, by = c("team_to" = "acronym", "year" = "year")) %>%
+  mutate(year = as.character(year))
 ```
 
 
@@ -236,29 +267,66 @@ rm(list = c("df","hitting_path"))
 hitting_panel <- bind_rows(hitting_list)
 # Obtener los nombres de columnas numéricas
 batter_numeric_columns <- names(hitting_panel)[sapply(hitting_panel, is.numeric)]
-head(hitting_panel)
-funcion_contar_na_por_columna(hitting_panel)
-```
-
-
-Merge this panel to the free agent's panel
-```{r batter-fa-merge}
+# Supongamos que ya tienes la lista batter_numeric_columns
+batter_numeric_columns <- c(batter_numeric_columns, c("revenue","years_experience"))
 hitting_panel_merge <- hitting_panel %>%
   left_join(free_agent_panel, by = c("player","team"="team_to","year")) %>%
-  filter(!is.na(contract_value)) %>%
-  filter(year >= initial_contract_year & year <= end_contract_year) %>%  
-  group_by(player, initial_contract_year, end_contract_year) %>%
+  mutate(
+    contract_normalized = (average_anual_contract_value - min(average_anual_contract_value, na.rm = TRUE))*(1 - 0)/(max(average_anual_contract_value, na.rm = TRUE) - min(average_anual_contract_value, na.rm = TRUE)) + 0
+  ) %>%
+  filter(year >= initial_contract_year & year <= end_contract_year) %>%
+  filter(!is.na(contract_value)) %>% 
+  filter(!is.na(contract_normalized)) %>%
+  group_by(player,team,position,initial_contract_year, end_contract_year) %>%
   summarise(
+    contract_normalized = mean(contract_normalized, na.rm = TRUE),
+    dummy_team_change = max(dummy_team_change, na.rm = TRUE),
+    age_min = min(age, na.rm = TRUE),
+    age_mean = mean(age, na.rm = TRUE),
+    age_max = max(age, na.rm = TRUE),
     across(all_of(batter_numeric_columns), 
            mean, 
            na.rm = TRUE, 
            .names = "mean_{.col}"),
     across(all_of(batter_numeric_columns), 
            last, 
-           .names = "{.col}_t1"),
-    
-    .groups = 'drop'
+           na.rm = TRUE, 
+           .names = "last_{.col}")
+  ) %>%
+  ungroup() %>% 
+  group_by(player) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  group_by(player) %>%
+  arrange(end_contract_year) %>%
+  mutate(Y_t = sqrt(dplyr::lead(contract_normalized)) - sqrt(contract_normalized)) %>%
+  ungroup() %>%
+  filter(!is.na(Y_t)) %>%
+  arrange(player,initial_contract_year,end_contract_year) %>%
+  group_by(team, end_contract_year) %>%
+  mutate(across(starts_with(c("mean_", "last_")), 
+                   list(team_max = max, team_min = min), 
+                   .names = "{.fn}_{.col}")) %>%
+  ungroup() %>%
+  mutate(
+    across(starts_with("mean_"), ~ ifelse(. > (get(paste0("team_max_", cur_column())) - get(paste0("team_min_", cur_column()))) / 2, 1, -1),
+           .names = "I_{.col}"),
+    across(starts_with("last_"), ~ ifelse(. > (get(paste0("team_max_", cur_column())) - get(paste0("team_min_", cur_column()))) / 2, 1, -1),
+           .names = "I_{.col}")
+  ) %>%
+  mutate(
+    across(starts_with("mean_"), 
+           ~ (get(paste0("I_", cur_column())) * .) / sqrt(get(paste0("team_max_", cur_column()))),
+           .names = "X_t_{.col}"),
+    across(starts_with("last_"), 
+           ~ (get(paste0("I_", cur_column())) * .) / sqrt(get(paste0("team_max_", cur_column()))),
+           .names = "X_t_{.col}")
   )
+```
+```{r}
+auxiliar_1 <- hitting_panel_merge %>%
+  select(player,mean_ab,team,end_contract_year,team_min_mean_ab,team_max_mean_ab,I_mean_ab,X_t_mean_ab)
+print(auxiliar_1)
 ```
 
 
